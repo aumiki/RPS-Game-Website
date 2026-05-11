@@ -6,13 +6,21 @@ import { connectSocket } from "@/lib/socket";
 
 const MOVE_ICONS = { ROCK:"✊", PAPER:"🖐️", SCISSORS:"✌️" };
 const MOVE_EMOJI = { ROCK:"💎", PAPER:"📄", SCISSORS:"✂️" };
+const BUFF_ICONS = { shield:"🛡️", spy:"👁️", extra_time:"⏱️", double_damage:"⚔️", heal:"💚", time_cut:"⏳", hp_drain:"💀", lock_random:"🔒", half_damage:"🪶", reveal:"🔍" };
 
 function GameContent() {
   const router = useRouter();
   const params = useSearchParams();
   const roomCode = params.get("room");
+  const gsParam = params.get("gs"); // game state awal dari URL
+
   const [user, setUser] = useState(null);
-  const [amIP1, setAmIP1] = useState(null); // null=belum tahu, true/false setelah init
+  const [myId, setMyId] = useState(null);
+
+  // isP1 disimpan di ref supaya tidak stale di closures
+  const isP1Ref = useRef(null);
+  const [isP1Display, setIsP1Display] = useState(null); // untuk render
+
   const [gameState, setGameState] = useState({
     phase: "waiting",
     round: 0,
@@ -23,24 +31,30 @@ function GameContent() {
     opponentPicked: false,
     lockedMove: null,
   });
+
   const [trivia, setTrivia] = useState(null);
   const [roundResult, setRoundResult] = useState(null);
   const [gameOver, setGameOver] = useState(null);
   const [effects, setEffects] = useState([]);
-  const [myId, setMyId] = useState(null);
   const [spyHint, setSpyHint] = useState(null);
   const [opponentExposed, setOpponentExposed] = useState(null);
   const socketRef = useRef(null);
   const timerRef = useRef(null);
 
-  function initState(state, currentUser) {
-    const uid = currentUser?.id;
+  // Set isP1 berdasarkan state dan userId
+  function determineAndSetIsP1(state, uid) {
+    if (!uid || !state?.p1?.id) return;
     const ip1 = state.p1.id === uid;
-    setAmIP1(ip1);
+    isP1Ref.current = ip1;
+    setIsP1Display(ip1);
+    console.log(`[GAME] isP1=${ip1}, myId=${uid}, p1.id=${state.p1.id}, p2.id=${state.p2?.id}`);
+  }
+
+  function applyStateUpdate(state) {
     setGameState(prev => ({
       ...prev,
-      p1: { id: state.p1.id, username: state.p1.username, hp: state.p1.hp, buffs: state.p1.buffs || [] },
-      p2: state.p2 ? { id: state.p2.id, username: state.p2.username, hp: state.p2.hp, buffs: state.p2.buffs || [] } : prev.p2,
+      p1: { ...prev.p1, id: state.p1.id, username: state.p1.username, hp: state.p1.hp, buffs: state.p1.buffs || [] },
+      p2: state.p2 ? { ...prev.p2, id: state.p2.id, username: state.p2.username, hp: state.p2.hp, buffs: state.p2.buffs || [] } : prev.p2,
     }));
   }
 
@@ -50,13 +64,41 @@ function GameContent() {
     setUser(u);
     setMyId(u.id);
 
+    // ── Inisialisasi dari URL parameter (paling reliable) ──
+    if (gsParam) {
+      try {
+        const state = JSON.parse(atob(gsParam));
+        console.log("[GAME] State dari URL:", state);
+        determineAndSetIsP1(state, u.id);
+        applyStateUpdate(state);
+      } catch (e) {
+        console.error("[GAME] Gagal parse state dari URL:", e);
+      }
+    }
+
     const socket = connectSocket();
     socketRef.current = socket;
 
-    socket.on("game:player_joined", ({ state }) => initState(state, u));
-    socket.on("game:joined", ({ state }) => { if (state) initState(state, u); });
-    socket.on("game:ranked_match_found", ({ state }) => initState(state, u));
-    socket.on("game:challenge_accepted", ({ state }) => initState(state, u));
+    // Backup: jika state belum ada, set dari event
+    socket.on("game:player_joined", ({ state }) => {
+      if (isP1Ref.current === null) determineAndSetIsP1(state, u.id);
+      applyStateUpdate(state);
+    });
+
+    socket.on("game:joined", ({ state }) => {
+      if (state && isP1Ref.current === null) determineAndSetIsP1(state, u.id);
+      if (state) applyStateUpdate(state);
+    });
+
+    socket.on("game:ranked_match_found", ({ state }) => {
+      if (isP1Ref.current === null) determineAndSetIsP1(state, u.id);
+      applyStateUpdate(state);
+    });
+
+    socket.on("game:challenge_accepted", ({ state }) => {
+      if (isP1Ref.current === null) determineAndSetIsP1(state, u.id);
+      applyStateUpdate(state);
+    });
 
     socket.on("game:round_start", ({ round, timer, p1HP, p2HP, p1Buffs, p2Buffs }) => {
       setSpyHint(null);
@@ -65,10 +107,10 @@ function GameContent() {
       setTrivia(null);
       setGameState(prev => ({
         ...prev,
-        phase:"picking", round, timer,
+        phase: "picking", round, timer,
         myMove: null, opponentPicked: false, lockedMove: null,
-        p1: { ...prev.p1, hp:p1HP, buffs: p1Buffs || [] },
-        p2: { ...prev.p2, hp:p2HP, buffs: p2Buffs || [] },
+        p1: { ...prev.p1, hp: p1HP, buffs: p1Buffs || [] },
+        p2: { ...prev.p2, hp: p2HP, buffs: p2Buffs || [] },
       }));
       let t = timer;
       if (timerRef.current) clearInterval(timerRef.current);
@@ -87,7 +129,7 @@ function GameContent() {
     socket.on("game:round_result", (data) => {
       clearInterval(timerRef.current);
       setGameState(prev => ({
-        ...prev, phase:"reveal",
+        ...prev, phase: "reveal",
         p1: { ...prev.p1, hp: data.p1HP },
         p2: { ...prev.p2, hp: data.p2HP },
       }));
@@ -95,7 +137,7 @@ function GameContent() {
     });
 
     socket.on("game:trivia_start", (data) => {
-      setGameState(prev => ({ ...prev, phase:"trivia" }));
+      setGameState(prev => ({ ...prev, phase: "trivia" }));
       setTrivia({ ...data, myAnswer: null, triviaTimer: data.timeLimit });
       let t = data.timeLimit;
       const interval = setInterval(() => {
@@ -112,9 +154,9 @@ function GameContent() {
     socket.on("game:effect_received", ({ effect }) => showEffect(effect));
 
     socket.on("game:trivia_resolved", (data) => {
-      setTrivia(prev => prev ? { ...prev, resolved: true, resolution: data } : prev);
+      setTrivia(prev => prev ? { ...prev, resolved: true } : prev);
       setGameState(prev => ({
-        ...prev, phase:"reveal",
+        ...prev, phase: "reveal",
         p1: { ...prev.p1, hp: data.p1HP },
         p2: { ...prev.p2, hp: data.p2HP },
       }));
@@ -122,7 +164,7 @@ function GameContent() {
 
     socket.on("game:over", (data) => {
       clearInterval(timerRef.current);
-      setGameState(prev => ({ ...prev, phase:"gameover" }));
+      setGameState(prev => ({ ...prev, phase: "gameover" }));
       setGameOver(data);
     });
 
@@ -138,7 +180,7 @@ function GameContent() {
        "game:over","game:player_disconnected","game:spy_reveal","game:opponent_exposed"
       ].forEach(ev => socket.off(ev));
     };
-  }, [roomCode]);
+  }, [roomCode, gsParam]);
 
   function showEffect(effect) {
     const id = Date.now();
@@ -158,12 +200,11 @@ function GameContent() {
     socketRef.current?.emit("game:trivia_answer", { roomCode, answer });
   }
 
-  // isP1 menggunakan amIP1 yang diset saat init — paling reliable
-  const isP1 = amIP1 === true;
+  // Gunakan isP1Display untuk render
+  const isP1 = isP1Display === true;
   const me = isP1 ? gameState.p1 : gameState.p2;
   const opponent = isP1 ? gameState.p2 : gameState.p1;
 
-  // Hasil ronde dari perspektif player ini
   let myResult = null;
   if (roundResult) {
     if (roundResult.result === "DRAW") myResult = "DRAW";
@@ -200,13 +241,13 @@ function GameContent() {
       <nav style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"16px 24px", borderBottom:"1px solid var(--border)" }}>
         <div>
           <div style={{ fontWeight:"800", fontSize:"18px", color:"#8B2635" }}>JANKEN</div>
-          <div style={{ fontSize:"11px", color:"#888", fontWeight:"600", letterSpacing:"0.5px" }}>
+          <div style={{ fontSize:"11px", color:"#888", fontWeight:"600" }}>
             RONDE {gameState.round}
             {gameState.round > 0 && gameState.round % 3 === 0 ? " • 🎯 TRIVIA BERIKUTNYA" : ""}
           </div>
         </div>
-        <div style={{ fontSize:"11px", color:"#aaa", fontWeight:"600" }}>
-          {isP1 ? "P1" : "P2"}
+        <div style={{ fontSize:"11px", color: isP1Display===null?"#bbb":"#4CAF7D", fontWeight:"700", background:"#f0f0f0", padding:"4px 10px", borderRadius:"20px" }}>
+          {isP1Display === null ? "..." : isP1 ? "● P1" : "● P2"}
         </div>
       </nav>
 
@@ -222,19 +263,19 @@ function GameContent() {
             <div style={{ flex:1 }}>
               <div style={{ display:"flex", justifyContent:"space-between", fontSize:"11px", color:"#888", marginBottom:"4px" }}>
                 <span>❤️ {me?.hp ?? 0} HP</span>
-                <span style={{ fontSize:"10px", color:"#aaa" }}>{(me?.buffs||[]).join(" ")}</span>
+                <span>{(me?.buffs||[]).map(b => BUFF_ICONS[b]||b).join("")}</span>
               </div>
               <div style={{ height:"10px", background:"#f0e8e8", borderRadius:"5px", overflow:"hidden" }}>
-                <div style={{ height:"100%", width:`${me?.hp ?? 0}%`, background:"#2D6A9F", borderRadius:"5px", transition:"width 0.5s ease" }}></div>
+                <div style={{ height:"100%", width:`${Math.max(0, Math.min(100, me?.hp ?? 0))}%`, background:"#2D6A9F", borderRadius:"5px", transition:"width 0.5s ease" }}></div>
               </div>
             </div>
             <div style={{ flex:1 }}>
               <div style={{ display:"flex", justifyContent:"space-between", fontSize:"11px", color:"#888", marginBottom:"4px" }}>
-                <span style={{ fontSize:"10px", color:"#aaa" }}>{(opponent?.buffs||[]).join(" ")}</span>
+                <span>{(opponent?.buffs||[]).map(b => BUFF_ICONS[b]||b).join("")}</span>
                 <span>❤️ {opponent?.hp ?? 0} HP</span>
               </div>
               <div style={{ height:"10px", background:"#f0e8e8", borderRadius:"5px", overflow:"hidden" }}>
-                <div style={{ height:"100%", width:`${opponent?.hp ?? 0}%`, background:"#8B2635", borderRadius:"5px", transition:"width 0.5s ease", marginLeft:"auto" }}></div>
+                <div style={{ height:"100%", width:`${Math.max(0, Math.min(100, opponent?.hp ?? 0))}%`, background:"#8B2635", borderRadius:"5px", transition:"width 0.5s ease", marginLeft:"auto" }}></div>
               </div>
             </div>
           </div>
@@ -244,7 +285,7 @@ function GameContent() {
         {gameState.phase === "picking" && (
           <div style={{ display:"flex", justifyContent:"center", marginBottom:"24px" }}>
             <div style={{ width:"90px", height:"90px", borderRadius:"50%", border:`4px solid ${timerColor}`, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", background:"#fff", boxShadow: gameState.timer<=2?"0 0 0 8px rgba(226,75,74,0.15)":"none", transition:"all 0.3s" }}>
-              <span style={{ fontSize:"36px", fontWeight:"900", color:timerColor, lineHeight:1 }}>{gameState.timer}</span>
+              <span style={{ fontSize:"36px", fontWeight:"900", color:timerColor, lineHeight:1 }}>{Math.max(0, gameState.timer)}</span>
               <span style={{ fontSize:"10px", color:"#aaa", letterSpacing:"1px" }}>DETIK</span>
             </div>
           </div>
@@ -253,7 +294,6 @@ function GameContent() {
         {/* VS Area */}
         {(gameState.phase === "picking" || gameState.phase === "reveal") && (
           <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:"16px", marginBottom:"24px" }}>
-            {/* My side */}
             <div style={{ flex:1, textAlign:"center" }}>
               <div style={{ fontSize:"12px", fontWeight:"700", color:"#2D6A9F", letterSpacing:"1px", marginBottom:"8px" }}>KAMU</div>
               <div style={{ width:"100px", height:"100px", borderRadius:"50%", border:"3px solid #8B2635", margin:"0 auto", background:"#F4A090", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"44px" }}>
@@ -261,15 +301,11 @@ function GameContent() {
                   ? MOVE_ICONS[isP1 ? roundResult?.p1Move : roundResult?.p2Move] || "?"
                   : gameState.myMove ? MOVE_ICONS[gameState.myMove] : "?"}
               </div>
-              {gameState.lockedMove && (
-                <div style={{ fontSize:"11px", color:"#E24B4A", fontWeight:"700", marginTop:"6px" }}>🔒 Terkunci</div>
-              )}
+              {gameState.lockedMove && <div style={{ fontSize:"11px", color:"#E24B4A", fontWeight:"700", marginTop:"6px" }}>🔒 Terkunci</div>}
             </div>
 
-            {/* VS */}
             <div style={{ width:"40px", height:"40px", borderRadius:"50%", background:"#8B2635", color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"12px", fontWeight:"800", flexShrink:0 }}>VS</div>
 
-            {/* Opponent */}
             <div style={{ flex:1, textAlign:"center" }}>
               <div style={{ display:"inline-block", background:"#f0e8e8", color:"#888", fontSize:"11px", fontWeight:"700", padding:"4px 10px", borderRadius:"20px", letterSpacing:"1px", marginBottom:"8px" }}>LAWAN</div>
               <div style={{ width:"100px", height:"100px", borderRadius:"50%", border:"2px solid #e8d8d8", margin:"0 auto", background:"#f5efef", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"40px" }}>
@@ -284,7 +320,7 @@ function GameContent() {
         )}
 
         {/* Round Result */}
-        {gameState.phase === "reveal" && roundResult && !trivia?.resolved === false && (
+        {gameState.phase === "reveal" && roundResult && (
           <div style={{ textAlign:"center", marginBottom:"20px", animation:"fadeIn 0.3s ease" }}>
             <div style={{ fontSize:"28px", fontWeight:"900", color: myResult==="WIN"?"#4CAF7D":myResult==="LOSE"?"#E24B4A":"#888", marginBottom:"4px" }}>
               {myResult === "WIN" ? "🎉 MENANG!" : myResult === "LOSE" ? "💔 KALAH!" : "🤝 SERI!"}
@@ -305,28 +341,26 @@ function GameContent() {
             <div style={{ textAlign:"center", marginBottom:"12px" }}>
               <span style={{ fontSize:"12px", fontWeight:"700", color:"#888", letterSpacing:"2px" }}>PILIH SENJATAMU</span>
             </div>
-
             {spyHint && (
               <div style={{ textAlign:"center", marginBottom:"10px", padding:"10px 16px", background:"#e8f5e9", borderRadius:"12px", fontSize:"13px", fontWeight:"700", color:"#2e7d32" }}>
                 👁️ Spy: Lawan TIDAK memilih {spyHint === "ROCK" ? "BATU" : spyHint === "PAPER" ? "KERTAS" : "GUNTING"}
               </div>
             )}
-
             {opponentExposed && (
               <div style={{ textAlign:"center", marginBottom:"10px", padding:"10px 16px", background:"#fff3e0", borderRadius:"12px", fontSize:"13px", fontWeight:"700", color:"#e65100" }}>
                 🔍 Lawan memilih: {opponentExposed === "ROCK" ? "BATU" : opponentExposed === "PAPER" ? "KERTAS" : "GUNTING"}!
               </div>
             )}
-
             <div style={{ display:"flex", gap:"12px" }}>
               {["ROCK","PAPER","SCISSORS"].map(m => {
                 const isLocked = gameState.lockedMove && gameState.lockedMove !== m;
                 const isSelected = gameState.myMove === m || gameState.lockedMove === m;
+                const isDisabled = !!gameState.myMove || !!gameState.lockedMove;
                 return (
                   <button key={m}
-                    onClick={() => !isLocked && !gameState.myMove && !gameState.lockedMove && sendMove(m)}
-                    disabled={!!gameState.myMove || !!gameState.lockedMove}
-                    style={{ flex:1, background:"#fff", border: isSelected?"2.5px solid #8B2635":"2px solid transparent", borderRadius:"20px", padding:"20px 8px", cursor: (isLocked||gameState.myMove||gameState.lockedMove)?"not-allowed":"pointer", textAlign:"center", boxShadow: isSelected?"0 4px 20px rgba(139,38,53,0.15)":"0 2px 12px rgba(0,0,0,0.05)", opacity: isLocked?0.3:1, transition:"all 0.15s" }}>
+                    onClick={() => !isDisabled && !isLocked && sendMove(m)}
+                    disabled={isDisabled}
+                    style={{ flex:1, background:"#fff", border: isSelected?"2.5px solid #8B2635":"2px solid #f0e8e8", borderRadius:"20px", padding:"20px 8px", cursor: isDisabled?"not-allowed":"pointer", textAlign:"center", boxShadow: isSelected?"0 4px 20px rgba(139,38,53,0.15)":"0 2px 12px rgba(0,0,0,0.05)", opacity: isLocked?0.3:1, transition:"all 0.15s" }}>
                     <div style={{ fontSize:"28px", marginBottom:"8px" }}>{MOVE_EMOJI[m]}</div>
                     <div style={{ fontSize:"12px", fontWeight:"800", color: isSelected?"#8B2635":"#1a1a1a", letterSpacing:"0.5px" }}>
                       {m === "ROCK" ? "BATU" : m === "PAPER" ? "KERTAS" : "GUNTING"}
@@ -343,10 +377,10 @@ function GameContent() {
         {gameState.phase === "trivia" && trivia && (
           <div style={{ background:"#fff", borderRadius:"20px", padding:"24px", boxShadow:"0 4px 20px rgba(0,0,0,0.08)", animation:"fadeIn 0.4s ease" }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"16px" }}>
-              <div style={{ background:"#8B2635", color:"#fff", borderRadius:"20px", padding:"4px 14px", fontSize:"12px", fontWeight:"700", letterSpacing:"1px" }}>🎯 TRIVIA TIME!</div>
+              <div style={{ background:"#8B2635", color:"#fff", borderRadius:"20px", padding:"4px 14px", fontSize:"12px", fontWeight:"700" }}>🎯 TRIVIA TIME!</div>
               <div style={{ fontSize:"20px", fontWeight:"900", color: (trivia.triviaTimer||0)<=5?"#E24B4A":"#8B2635" }}>{trivia.triviaTimer || 0}s</div>
             </div>
-            <p style={{ fontSize:"16px", fontWeight:"600", color:"#1a1a1a", marginBottom:"20px", lineHeight:"1.5" }}>{trivia.question}</p>
+            <p style={{ fontSize:"15px", fontWeight:"600", color:"#1a1a1a", marginBottom:"20px", lineHeight:"1.5" }}>{trivia.question}</p>
             <div style={{ display:"flex", flexDirection:"column", gap:"10px" }}>
               {trivia.options?.map((opt, i) => {
                 let bg = "#fff", border = "1.5px solid #e0d8d8", color = "#1a1a1a";
@@ -395,10 +429,10 @@ function GameContent() {
               </div>
             )}
             <div style={{ display:"flex", gap:"12px", justifyContent:"center" }}>
-              <button onClick={() => router.push("/lobby")} style={{ padding:"12px 28px", borderRadius:"50px", border:"none", background:"#8B2635", color:"#fff", fontWeight:"700", fontSize:"14px" }}>
+              <button onClick={() => router.push("/lobby")} style={{ padding:"12px 28px", borderRadius:"50px", border:"none", background:"#8B2635", color:"#fff", fontWeight:"700", fontSize:"14px", cursor:"pointer" }}>
                 Kembali ke Lobby
               </button>
-              <button onClick={() => router.push("/leaderboard")} style={{ padding:"12px 28px", borderRadius:"50px", border:"2px solid #8B2635", background:"transparent", color:"#8B2635", fontWeight:"700", fontSize:"14px" }}>
+              <button onClick={() => router.push("/leaderboard")} style={{ padding:"12px 28px", borderRadius:"50px", border:"2px solid #8B2635", background:"transparent", color:"#8B2635", fontWeight:"700", fontSize:"14px", cursor:"pointer" }}>
                 Lihat Ranking
               </button>
             </div>
