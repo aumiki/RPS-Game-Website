@@ -9,7 +9,7 @@ export function getSocket() {
     // NEXT_PUBLIC_SOCKET_URL = URL Railway server (standalone Socket.io game server)
     // Vercel berjalan serverless — Socket.IO persistent connection TIDAK bisa berjalan di Vercel.
     // Semua game event (create_room, join_room, ranked match) harus diarahkan ke Railway.
-    const serverUrl = process.env.NEXT_PUBLIC_SOCKET_URL || "";
+    const serverUrl = process.env.NEXT_PUBLIC_SOCKET_URL || "https://rps-socket-server-production.up.railway.app";
 
     if (!serverUrl && typeof window !== "undefined") {
       console.warn("[SOCKET] NEXT_PUBLIC_SOCKET_URL belum di-set di environment Vercel!");
